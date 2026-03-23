@@ -16,6 +16,20 @@ python inference.py --config configs/ddpm.yaml --ckpt /path/to/checkpoint
 
 Set up a local Python environment with `setup_env_modern.sh` (Python 3.9+) or `setup_env_368.sh` (Python 3.6.8 where available). See `requirements.txt` / `requirements-py36.txt`.
 
+### PSC / Colab adapters (this repo)
+
+| Piece | Purpose |
+|--------|---------|
+| `ddpm_runtime.py` | Resolves **runtime profile** (`colab` / `psc` / `local`): Colab forces `num_workers=0`; optional env overrides below. |
+| `train.py --runtime auto\|local\|colab\|psc` | **`auto`**: detects Colab via `google.colab`; else local. Env **`DDPM_RUNTIME`** overrides the flag. |
+| **`DDPM_DATA_DIR`**, **`DDPM_OUTPUT_DIR`** | Optional: override `data_dir` and `output_dir` (e.g. Ocean or Drive paths). |
+| `configs/ddpm_colab.yaml` | Smaller batch / fewer epochs / `num_workers: 0` for notebooks. |
+| `configs/ddpm_psc.yaml` | Defaults suited to batch GPU jobs; combine with env paths as needed. |
+| `requirements-psc.txt` | Pip deps **only** (use **after** `module load` + `source activate $AI_ENV` — do not reinstall torch). |
+| `scripts/train_bridges2_gpu_shared.sbatch` | Example **Slurm** script for **GPU-shared** (edit module, paths, `#SBATCH -A`). |
+| `scripts/psc_interactive_gpu.sh` | Prints **interact** + setup commands for copy-paste. |
+| `colab/DDPM_CIFAR10.ipynb` | Ready-made Colab notebook (set `REPO_URL`, enable GPU runtime). |
+
 ---
 
 ## Running on Pittsburgh Supercomputing Center (PSC)
@@ -47,10 +61,10 @@ source activate $AI_ENV
 conda list    # verify torch and other packages
 ```
 
-Install any missing pip dependencies for this repo (e.g. `ruamel.yaml`) after activation:
+Install pip dependencies **without** replacing the module’s PyTorch:
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-psc.txt
 ```
 
 **Interactive GPU session**
@@ -61,31 +75,24 @@ The Bridges-2 User Guide documents **GPU** partitions (`GPU`, `GPU-shared`), **`
 interact -p GPU-shared --gres=gpu:v100-32:1 -t 2:00:00
 ```
 
-Then `module load …`, `source activate $AI_ENV`, clone or `cd` to the project, and run `python train.py --config configs/ddpm.yaml`.
+Then `module load …`, `source activate $AI_ENV`, `cd` to the repo, `pip install -r requirements-psc.txt`, and run:
+
+```bash
+export DDPM_RUNTIME=psc
+python train.py --config configs/ddpm_psc.yaml --runtime psc
+```
+
+See also `scripts/psc_interactive_gpu.sh` for a printable checklist.
 
 **Batch job (`sbatch`)**
 
-The User Guide includes **sample batch scripts** for the **GPU-shared** partition (e.g. `#SBATCH -p GPU-shared`, `#SBATCH --gpus=v100-32:…`, walltime). Adapt that template: set `#SBATCH -A` if you must charge a non-default allocation (documented under `sbatch` options). Example skeleton:
+Use the checked-in template **`scripts/train_bridges2_gpu_shared.sbatch`**: edit the **`module load`** line to match `module spider AI`, set **`#SBATCH -A`** if required, and point the working directory at your clone (often under **`/ocean/projects/...`** per the User Guide). Submit from that directory:
 
 ```bash
-#!/bin/bash
-#SBATCH -N 1
-#SBATCH -p GPU-shared
-#SBATCH --gpus=v100-32:1
-#SBATCH -t 8:00:00
-#SBATCH -J ddpm-cifar
-
-set -euo pipefail
-cd /path/to/11685-Diffusion-Project
-
-module load AI/pytorch_23.02-1.13.1-py3   # match 'module spider AI' on Bridges-2
-source activate $AI_ENV
-pip install -q -r requirements.txt      # if needed
-
-python train.py --config configs/ddpm.yaml
+sbatch scripts/train_bridges2_gpu_shared.sbatch
 ```
 
-Use your PSC **project path** (e.g. under Ocean) for `cd` and outputs; the User Guide’s batch examples use `/ocean/projects/...` paths.
+The script sets **`DDPM_RUNTIME=psc`** and installs **`requirements-psc.txt`** before `train.py`.
 
 **Help**
 
@@ -101,26 +108,21 @@ PSC lists **help@psc.edu** in the Bridges-2 documentation for support questions.
 
 The FAQ states you can select **Runtime → Change runtime type** and set **Hardware accelerator** (e.g. to **GPU** when you need acceleration, or **None** if you are not using the GPU—see the FAQ item on GPU utilization). **Available GPU/TPU types vary over time**; the FAQ explicitly says they are not fixed.
 
-**Suggested notebook workflow**
+**Notebook in this repo**
 
-1. Open a new notebook in Colab.
-2. Set the runtime type as above if you want a GPU runtime.
-3. Clone the repository and install dependencies (Colab’s base image includes PyTorch in many runtimes; you still need this project’s other packages):
+Upload or open **`colab/DDPM_CIFAR10.ipynb`** in Colab (e.g. upload the file, or open from GitHub if you host it there). Edit **`REPO_URL`**, enable a GPU runtime as above, then run all cells.
+
+**Command-line equivalent**
+
+Colab’s base image often includes PyTorch; install the rest and train with the Colab config ( **`--runtime colab`** or **`DDPM_RUNTIME=colab`** also forces safe DataLoader settings):
 
 ```python
-# Replace the URL with your fork or the course repo.
-!git clone https://github.com/<org-or-user>/11685-Diffusion-Project.git
-%cd 11685-Diffusion-Project
 !pip install -q ruamel.yaml tqdm
+# clone + %cd into repo ...
+!python train.py --config configs/ddpm_colab.yaml --runtime colab
 ```
 
-4. Train (CIFAR-10 will download automatically if `cifar_download` is true in config):
-
-```python
-!python train.py --config configs/ddpm.yaml --num_workers 0
-```
-
-Use `--num_workers 0` in Colab to avoid multiprocessing issues with the DataLoader in some notebook setups.
+With **`--runtime auto`**, Colab is detected automatically and **`num_workers`** is set to **0** even if the YAML says otherwise.
 
 **Persistence and limits**
 

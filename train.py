@@ -16,6 +16,7 @@ from models import UNet, VAE, ClassEmbedder
 from schedulers import DDPMScheduler, DDIMScheduler
 from pipelines import DDPMPipeline
 from utils import seed_everything, init_distributed_device, is_primary, AverageMeter, str2bool, save_checkpoint
+from ddpm_runtime import apply_runtime_to_args
 
 logger = get_logger(__name__)
 
@@ -83,6 +84,14 @@ def parse_args():
         default=True,
         help="If false, use CIFAR files already under data/cifar10 (no HTTPS download).",
     )
+    parser.add_argument(
+        "--runtime",
+        type=str,
+        default="auto",
+        choices=["auto", "local", "colab", "psc"],
+        help="Training profile: auto (detect Colab), local, colab, or psc. "
+        "Override with env DDPM_RUNTIME=colab|psc|local.",
+    )
 
     args = parser.parse_args()
 
@@ -121,6 +130,8 @@ def build_dataset(args):
 
 def main():
     args = parse_args()
+    apply_runtime_to_args(args)
+
     seed_everything(args.seed)
 
     logging.basicConfig(
@@ -128,6 +139,8 @@ def main():
         datefmt="%m/%d/%Y %H:%M:%S",
         level=logging.INFO,
     )
+
+    logger.info("DDPM runtime profile: %s", getattr(args, "_ddpm_runtime", "local"))
 
     device = init_distributed_device(args)
     if args.distributed:
