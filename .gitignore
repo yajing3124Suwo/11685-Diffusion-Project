@@ -1,0 +1,32 @@
+# Virtual environments (never push — torch alone is >100MB)
+.venv/
+.venv-*/
+.venv-smoke/
+.conda-env-368/
+
+# Data & checkpoints (download locally; CIFAR .tar.gz > GitHub 100MB limit)
+data/
+
+# Training outputs
+experiments/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Optional
+wandb/
+*.pt
+*.pth
+*.ckpt

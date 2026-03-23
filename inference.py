@@ -1,17 +1,13 @@
-import os 
-import sys 
-import argparse
-import numpy as np
-import ruamel.yaml as yaml
-import torch
-import wandb 
-import logging 
+# -*- coding: utf-8 -*-
+import logging
+import os
 from logging import getLogger as get_logger
-from tqdm import tqdm 
-from PIL import Image
-import torch.nn.functional as F
 
-from torchvision.utils  import make_grid
+import torch
+from tqdm import tqdm
+from PIL import Image
+
+from torchvision import datasets, transforms
 
 from models import UNet, VAE, ClassEmbedder
 from schedulers import DDPMScheduler, DDIMScheduler
@@ -23,71 +19,64 @@ from train import parse_args
 logger = get_logger(__name__)
 
 
+def build_val_dataset(args):
+    transform = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+        ]
+    )
+    if args.dataset == "cifar10":
+        root = os.path.join(args.data_dir, "cifar10")
+        return datasets.CIFAR10(root=root, train=False, download=args.cifar_download, transform=transform)
+    return datasets.ImageFolder(root=os.path.join(args.data_dir, "val"), transform=transform)
+
+
 def main():
-    # parse arguments
     args = parse_args()
-    
-    # device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # seed everything
     seed_everything(args.seed)
     generator = torch.Generator(device=device)
     generator.manual_seed(args.seed)
-    
-    # setup logging
+
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
         level=logging.INFO,
     )
-    
-    # setup model
+
     logger.info("Creating model")
-    # unet
-    unet = UNet(input_size=args.unet_in_size, input_ch=args.unet_in_ch, T=args.num_train_timesteps, ch=args.unet_ch, ch_mult=args.unet_ch_mult, attn=args.unet_attn, num_res_blocks=args.unet_num_res_blocks, dropout=args.unet_dropout, conditional=args.use_cfg, c_dim=args.unet_ch)
-    # preint number of parameters
-    num_params = sum(p.numel() for p in unet.parameters() if p.requires_grad)
-    logger.info(f"Number of parameters: {num_params / 10 ** 6:.2f}M")
-    
-    # TODO: ddpm shceduler
-    scheduler = DDPMScheduler(
-        num_train_timesteps=args.num_train_timesteps,
-        num_inference_steps=args.num_inference_steps,
-        beta_start=args.beta_start,
-        beta_end=args.beta_end,
-        beta_schedule=args.beta_schedule,
-        variance_type=args.variance_type,
-        prediction_type=args.prediction_type,
-        clip_sample=args.clip_sample,
-        clip_sample_range=args.clip_sample_range
+    attn_levels = list(args.unet_attn) if (args.unet_attn is not None and len(args.unet_attn) > 0) else []
+    unet = UNet(
+        input_size=args.unet_in_size,
+        input_ch=args.unet_in_ch,
+        T=args.num_train_timesteps,
+        ch=args.unet_ch,
+        ch_mult=tuple(args.unet_ch_mult),
+        attn=attn_levels,
+        num_res_blocks=args.unet_num_res_blocks,
+        dropout=args.unet_dropout,
+        conditional=args.use_cfg,
+        c_dim=args.unet_ch,
     )
-    # vae 
+    num_params = sum(p.numel() for p in unet.parameters() if p.requires_grad)
+    logger.info("Number of parameters: %.2fM", num_params / 1.0e6)
+
     vae = None
-    if args.latent_ddpm:        
+    if args.latent_ddpm:
         vae = VAE()
-        vae.init_from_ckpt('pretrained/model.ckpt')
+        vae.init_from_ckpt("pretrained/model.ckpt")
         vae.eval()
-    # cfg
+
     class_embedder = None
     if args.use_cfg:
-        # TODO: class embeder
         class_embedder = ClassEmbedder(args.unet_ch, n_classes=args.num_classes)
-        
-    # send to device
-    unet = unet.to(device)
-    scheduler = scheduler.to(device)
-    if vae:
-        vae = vae.to(device)
-    if class_embedder:
-        class_embedder = class_embedder.to(device)
-        
-    # scheduler
+
     if args.use_ddim:
         scheduler_class = DDIMScheduler
     else:
         scheduler_class = DDPMScheduler
-    # TOOD: scheduler
+
     scheduler = scheduler_class(
         num_train_timesteps=args.num_train_timesteps,
         num_inference_steps=args.num_inference_steps,
@@ -97,30 +86,26 @@ def main():
         variance_type=args.variance_type,
         prediction_type=args.prediction_type,
         clip_sample=args.clip_sample,
-        clip_sample_range=args.clip_sample_range
+        clip_sample_range=args.clip_sample_range,
     )
 
-    # load checkpoint
+    unet = unet.to(device)
+    scheduler = scheduler.to(device)
+    if vae is not None:
+        vae = vae.to(device)
+    if class_embedder is not None:
+        class_embedder = class_embedder.to(device)
+
     load_checkpoint(unet, scheduler, vae=vae, class_embedder=class_embedder, checkpoint_path=args.ckpt)
-    
-    # TODO: pipeline
-    pipeline = DDPMPipeline(
-        unet=unet,
-        scheduler=scheduler,
-        vae=vae,
-        class_embedder=class_embedder
-    )
 
-    
-    logger.info("***** Running Infrence *****")
-    
-    # TODO: we run inference to generation 5000 images
-    # TODO: with cfg, we generate 50 images per class 
+    pipeline = DDPMPipeline(unet=unet, scheduler=scheduler, vae=vae, class_embedder=class_embedder)
+
+    logger.info("***** Running inference *****")
+
     all_images = []
     if args.use_cfg:
-        # generate 50 images per class
         for i in tqdm(range(args.num_classes)):
-            logger.info(f"Generating 50 images for class {i}")
+            logger.info("Generating 50 images for class %s", i)
             batch_size = 50
             classes = torch.full((batch_size,), i, dtype=torch.long, device=device)
             gen_images = pipeline(
@@ -129,74 +114,61 @@ def main():
                 classes=classes,
                 guidance_scale=args.cfg_guidance_scale,
                 generator=generator,
-                device=device
+                device=device,
             )
             all_images.extend(gen_images)
     else:
-        # generate 5000 images
         batch_size = 50
         for _ in tqdm(range(0, 5000, batch_size)):
             gen_images = pipeline(
                 batch_size=batch_size,
                 num_inference_steps=args.num_inference_steps,
                 generator=generator,
-                device=device
+                device=device,
             )
             all_images.extend(gen_images)
-    
-    # TODO: load validation images as reference batch
-    from torchvision import datasets, transforms
-    transform = transforms.Compose([
-        transforms.Resize((args.image_size, args.image_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    ])
-    val_dataset = datasets.ImageFolder(root='./data/imagenet100_128x128/val', transform=transform)
+
+    val_dataset = build_val_dataset(args)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=50, shuffle=False)
-    
-    # collect reference images
+
     ref_images = []
     for batch_idx, (imgs, _) in enumerate(val_loader):
         ref_images.append(imgs)
-        if batch_idx >= 99:  # 100 batches * 50 = 5000 images
+        if batch_idx >= 99:
             break
-    ref_images = torch.cat(ref_images, dim=0)[:5000]  # ensure exactly 5000 images
-    ref_images = (ref_images + 1) / 2  # rescale to [0, 1]
-    
-    
-    # TODO: using torchmetrics for evaluation, check the documents of torchmetrics
-    import torchmetrics 
-    
-    from torchmetrics.image.fid import FrechetInceptionDistance, InceptionScore
-    
-    # TODO: compute FID and IS
-    # convert generated images to tensors
+    ref_images = torch.cat(ref_images, dim=0)[:5000]
+    ref_images = (ref_images + 1) / 2
+
+    try:
+        import torchmetrics
+        from torchmetrics.image.fid import FrechetInceptionDistance
+
+        try:
+            from torchmetrics.image.inception import InceptionScore
+        except ImportError:
+            from torchmetrics.image.fid import InceptionScore
+    except ImportError:
+        logger.warning("torchmetrics not installed; skip FID/IS. pip install torchmetrics")
+        return
+
     gen_tensors = []
     for img in all_images:
-        # convert PIL to tensor
-        tensor = transforms.ToTensor()(img)
-        gen_tensors.append(tensor)
+        gen_tensors.append(transforms.ToTensor()(img))
     gen_tensors = torch.stack(gen_tensors)
-    
-    # initialize metrics
+
     fid = FrechetInceptionDistance(feature=64, normalize=False).to(device)
     inception = InceptionScore(normalize=False).to(device)
-    
-    # update metrics
+
     fid.update(ref_images, real=True)
     fid.update(gen_tensors, real=False)
     inception.update(gen_tensors)
-    
-    # compute scores
+
     fid_score = fid.compute()
     is_mean, is_std = inception.compute()
-    
-    logger.info(f"FID Score: {fid_score:.2f}")
-    logger.info(f"Inception Score: {is_mean:.2f} ± {is_std:.2f}")
-    
-        
-    
+
+    logger.info("FID Score: %s", fid_score)
+    logger.info("Inception Score: %s +/- %s", is_mean, is_std)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
