@@ -34,104 +34,223 @@ Set up a local Python environment with `setup_env_modern.sh` (Python 3.9+) or `s
 
 ## Running on Pittsburgh Supercomputing Center (PSC)
 
-This project is written for **PyTorch on Linux**. On PSC, **Bridges-2** is the primary system where PyTorch is provided through PSC-maintained **AI** modules. Official references:
+This project targets **PyTorch on Linux**. On PSC, **Bridges-2** is the main system where PyTorch is provided through PSC **AI** modules. Keep these official pages open while you work:
 
-- [Bridges-2 User Guide](https://www.psc.edu/resources/bridges-2/user-guide/) (partitions, `sbatch`, `interact`, GPU options)
-- [PSC environments for AI applications](https://www.psc.edu/resources/software/AI/) (`module spider AI`, `module help …`)
-- [PyTorch at PSC](https://www.psc.edu/resources/software/pytorch/) (points to Bridges-2 AI modules)
+- [Bridges-2 User Guide](https://www.psc.edu/resources/bridges-2/user-guide/) — **Connecting**, **Running jobs**, **GPU partitions**, `sbatch` / `interact`
+- [Getting started with HPC (Bridges-2)](https://www.psc.edu/resources/bridges-2/getting-started-with-hpc/) — login vs compute nodes, SSH vs OnDemand
+- [PSC AI software environments](https://www.psc.edu/resources/software/AI/) — `module spider AI`, `$AI_ENV`
+- [PyTorch at PSC](https://www.psc.edu/resources/software/pytorch/)
 
-**Requirements**
+**Important:** Production jobs must run on **compute nodes** (interactive allocation or batch), **not** on login nodes. See the User Guide and [Getting started](https://www.psc.edu/resources/bridges-2/getting-started-with-hpc/).
 
-- A valid **Bridges-2** account and an allocation that includes **Bridges-2 GPU** if you use GPU partitions (`GPU`, `GPU-shared`). Partition access depends on your allocation; see the User Guide section *Which partitions can I use?*
-- Run training on **compute nodes** (batch or interactive job), not on login nodes.
+### Step 1 — Account and allocation
 
-**Software (PyTorch module)**
+- You need a **PSC / ACCESS (or course)** account and a **Bridges-2** allocation that includes **Bridges-2 GPU** if you plan to use GPU partitions (`GPU`, `GPU-shared`). Which **partitions** you may use depends on that allocation (User Guide: *Which partitions can I use?*).
+- Support: **help@psc.edu** (as documented by PSC).
 
-PSC documents that PyTorch is available via **AI/pytorch** modules on Bridges-2. List versions with:
+### Step 2 — Log in to Bridges-2 (login node)
+
+PSC documents two ways to reach Bridges-2: **SSH** and **OnDemand** (browser). Full detail is in the User Guide section [**Connecting to Bridges-2**](https://www.psc.edu/resources/bridges-2/user-guide/#connecting).
+
+**SSH (typical workflow from your laptop)**
+
+1. Install or use an **SSH client** (macOS and Linux usually have `ssh` in Terminal; Windows: PuTTY, Windows Terminal, etc.). PSC discusses SSH and keys in [About using SSH](https://www.psc.edu/about-using-ssh/).
+2. Per the Bridges-2 User Guide, connect to hostname **`bridges2.psc.edu`**, port **22**, with your **PSC username**:
+
+   ```bash
+   ssh YOUR_PSC_USERNAME@bridges2.psc.edu
+   ```
+
+3. Complete any extra authentication your institution requires (e.g. Duo), if prompted.
+
+After login, your prompt is on a **login node** (hostname often looks like `bridges2-login…`). Use this node only for **editing files, `git`, submitting jobs** — not for training.
+
+**OnDemand**
+
+If you prefer a web UI, use **OnDemand** as described in the [OnDemand section](https://www.psc.edu/resources/bridges-2/user-guide/#ondemand) of the User Guide. You still use Slurm (`sbatch`, `interact`, etc.) according to the same cluster rules.
+
+### Step 3 — Where to put the project (home vs Ocean)
+
+- **Home directory** (`~`): fine for the code repo and small files; quotas are limited.
+- **Ocean** (`/ocean/projects/…`): shared project space for allocations; the User Guide explains Ocean paths for persistent, larger storage. For long runs, many users keep **checkpoints and datasets** under `/ocean/projects/<allocation>/<username>/…` and set **`DDPM_OUTPUT_DIR`** / **`DDPM_DATA_DIR`** (see `ddpm_runtime.py`).
+
+**Large file transfers** to/from Bridges-2 should use PSC’s **Data Transfer Nodes** (**`data.bridges2.psc.edu`**), as described in the User Guide — not sustained heavy transfer through the login node.
+
+### Step 4 — Clone this repository from GitHub (on the login node)
+
+`git` is commonly available on Bridges-2. From your home or Ocean project directory:
+
+```bash
+cd ~
+# or: cd /ocean/projects/YOUR_ALLOC/YOUR_USER
+
+git clone https://github.com/YOUR_GITHUB_USER/11685-Diffusion-Project.git
+cd 11685-Diffusion-Project
+```
+
+- **Private repository:** use a [GitHub personal access token](https://docs.github.com/en/authentication) with HTTPS, or configure **SSH keys** on Bridges-2 and clone with `git@github.com:USER/REPO.git`. Do not commit secrets into the repo.
+- **Updates:** run `git pull` inside the clone after you push changes from your laptop.
+
+### Step 5 — Load PyTorch (PSC AI module) and pip dependencies
+
+PSC provides PyTorch in **AI/pytorch** modules. List available names:
 
 ```bash
 module spider AI
 ```
 
-Load a specific module (example names appear in the `module spider` output, e.g. `AI/pytorch_23.02-1.13.1-py3`; **use the version your site lists**), then activate the environment variable **`$AI_ENV`** as described on the [AI software page](https://www.psc.edu/resources/software/AI/):
+Load one module (replace with a name **you** see from `module spider`), then activate **`$AI_ENV`** as in the [AI software page](https://www.psc.edu/resources/software/AI/):
 
 ```bash
-module load AI/pytorch_23.02-1.13.1-py3   # replace with an available module from 'module spider AI'
+module load AI/pytorch_23.02-1.13.1-py3
 source activate $AI_ENV
-conda list    # verify torch and other packages
+conda list | head   # optional: confirm torch is present
 ```
 
-Install pip dependencies **without** replacing the module’s PyTorch:
+Install **only** extra pip packages (do **not** `pip install torch` in a way that replaces the module stack):
 
 ```bash
+cd ~/11685-Diffusion-Project   # or your path
 pip install -r requirements-psc.txt
 ```
 
-**Interactive GPU session**
+### Step 6 — Request a GPU and train
 
-The Bridges-2 User Guide documents **GPU** partitions (`GPU`, `GPU-shared`), **`interact`**, and GPU requests via **`--gres=gpu:type:n`**, where **`type`** is one of **`v100-16`**, **`v100-32`**, **`l40s-48`**, **`h100-80`** (see the User Guide *GPU partitions* / *interact* sections). Example pattern from the guide for **GPU-shared**:
+**Option A — Interactive GPU (good for debugging)**
+
+From the **login** node, request an interactive session on a **GPU** partition. The User Guide documents **`interact`**, **`--gres=gpu:type:n`**, and GPU types **`v100-16`**, **`v100-32`**, **`l40s-48`**, **`h100-80`**. Example for **GPU-shared** with one **v100-32** GPU:
 
 ```bash
 interact -p GPU-shared --gres=gpu:v100-32:1 -t 2:00:00
 ```
 
-Then `module load …`, `source activate $AI_ENV`, `cd` to the repo, `pip install -r requirements-psc.txt`, and run:
+Wait until the shell is on a **compute** node. Then:
 
 ```bash
+module load AI/pytorch_23.02-1.13.1-py3
+source activate $AI_ENV
+cd ~/11685-Diffusion-Project
+pip install -r requirements-psc.txt   # if not already done in this env
 export DDPM_RUNTIME=psc
+# Optional: large outputs on Ocean
+# export DDPM_OUTPUT_DIR=/ocean/projects/ALLOC/USER/ddpm_runs
+# export DDPM_DATA_DIR=/ocean/projects/ALLOC/USER/ddpm_data
 python train.py --config configs/ddpm_psc.yaml --runtime psc
 ```
 
-See also `scripts/psc_interactive_gpu.sh` for a printable checklist.
+**Option B — Batch job (good for long training)**
 
-**Batch job (`sbatch`)**
+1. Edit **`scripts/train_bridges2_gpu_shared.sbatch`**: set **`module load`** to your module, uncomment and set **`#SBATCH -A`** if your allocation requires it.
+2. From the **login** node, `cd` to the **repository root** (so `SLURM_SUBMIT_DIR` is the project), then:
 
-Use the checked-in template **`scripts/train_bridges2_gpu_shared.sbatch`**: edit the **`module load`** line to match `module spider AI`, set **`#SBATCH -A`** if required, and point the working directory at your clone (often under **`/ocean/projects/...`** per the User Guide). Submit from that directory:
+   ```bash
+   sbatch scripts/train_bridges2_gpu_shared.sbatch
+   ```
 
-```bash
-sbatch scripts/train_bridges2_gpu_shared.sbatch
-```
+3. Monitor with **`squeue -u YOUR_USERNAME`** and read Slurm output files in the submit directory (User Guide: **`sbatch`**, **`squeue`**).
 
-The script sets **`DDPM_RUNTIME=psc`** and installs **`requirements-psc.txt`** before `train.py`.
-
-**Help**
-
-PSC lists **help@psc.edu** in the Bridges-2 documentation for support questions.
+**Checklist file:** `scripts/psc_interactive_gpu.sh` prints the same interact/setup steps for copy-paste.
 
 ---
 
 ## Running on Google Colab
 
-[Google Colab](https://colab.research.google.com/) is a hosted notebook service that, per the [official Colab FAQ](https://research.google.com/colaboratory/faq.html), provides access to computing resources **including GPUs and TPUs**, with usage limits that **vary over time** and are **not published** in full detail.
+[Google Colab](https://colab.research.google.com/) is a **hosted Jupyter** service: you run **notebook cells**; lines starting with **`!`** run shell commands on the VM. The [Colab FAQ](https://research.google.com/colaboratory/faq.html) states that Colab offers resources **including GPUs and TPUs**, that **limits and hardware types change over time**, and that **free GPU access is heavily restricted**.
 
-**Enable GPU (when available)**
+### Do you need Google Drive?
 
-The FAQ states you can select **Runtime → Change runtime type** and set **Hardware accelerator** (e.g. to **GPU** when you need acceleration, or **None** if you are not using the GPU—see the FAQ item on GPU utilization). **Available GPU/TPU types vary over time**; the FAQ explicitly says they are not fixed.
+| Goal | Need Google Drive? |
+|------|---------------------|
+| Put **source code** on the Colab VM | **No**, if you **`git clone`** or **upload a zip** (see below). |
+| **CIFAR-10** (default config) in one session | **No**: `torchvision` downloads into **`./data`** on the VM. |
+| **Keep checkpoints** after disconnect | **Strongly recommended:** VMs are **temporary**; the FAQ describes disconnects and limits. Use **Drive**, **browser download**, or another external store. |
+| Multi-day training | Expect **multiple sessions**; persist **`experiments/`** (and optionally **`data/`**) to Drive or download between runs. |
 
-**Notebook in this repo**
+The FAQ notes **Drive-mounted I/O can be slow**. For training, keep **`data/`** and hot checkpoints on the VM disk under **`/content/...`**, and **copy finished checkpoints to Drive** (or download) when an epoch completes.
 
-Upload or open **`colab/DDPM_CIFAR10.ipynb`** in Colab (e.g. upload the file, or open from GitHub if you host it there). Edit **`REPO_URL`**, enable a GPU runtime as above, then run all cells.
+### How to get this project into Colab (pick one)
 
-**Command-line equivalent**
+#### Method 1 — `git clone` in a notebook cell (no Drive needed for code)
 
-Colab’s base image often includes PyTorch; install the rest and train with the Colab config ( **`--runtime colab`** or **`DDPM_RUNTIME=colab`** also forces safe DataLoader settings):
+Works for a **public** repo. For a **private** repo, use a GitHub **token** in the HTTPS URL — **do not** share notebooks containing a raw token; a **public fork** is safer for coursework.
+
+1. **Runtime → Change runtime type → Hardware accelerator → GPU** (recommended for DDPM).
+2. In a cell:
+
+```python
+REPO_URL = "https://github.com/YOUR_USER/11685-Diffusion-Project.git"
+!git clone {REPO_URL}
+%cd 11685-Diffusion-Project
+```
+
+#### Method 2 — Open `colab/DDPM_CIFAR10.ipynb`
+
+1. Ensure the repo is on **GitHub** (or download **`colab/DDPM_CIFAR10.ipynb`** only from the GitHub web UI).
+2. **Upload** that notebook: Colab **File → Upload notebook**, **or** open directly from GitHub (URL pattern):
+
+   `https://colab.research.google.com/github/YOUR_USER/11685-Diffusion-Project/blob/main/colab/DDPM_CIFAR10.ipynb`
+
+3. Set **`REPO_URL`** in the first code cell, enable **GPU** runtime, **Run all**.
+
+#### Method 3 — Upload a zip of the project
+
+1. On your computer, zip the project folder (omit `.venv`, huge `data/` if you will re-download CIFAR).
+2. In Colab, open the **Files** pane → **Upload** the zip.
+3. In a cell:
+
+```python
+!unzip -q -o 11685-Diffusion-Project.zip -d /content/
+%cd /content/11685-Diffusion-Project
+```
+
+(Change the zip filename to match your upload.)
+
+#### Method 4 — Copy from Google Drive (optional)
+
+Use if your copy of the repo lives on Drive (e.g. synced with **Google Drive for desktop**).
+
+```python
+from google.colab import drive
+drive.mount("/content/drive")
+```
+
+Copy to **local** VM disk before training (reduces slow reads from Drive during imports/training):
+
+```python
+!cp -r "/content/drive/MyDrive/path/to/11685-Diffusion-Project" /content/ddpm
+%cd /content/ddpm
+```
+
+### Install dependencies and run training
+
+Colab often ships with **PyTorch**; install the rest, then train:
 
 ```python
 !pip install -q ruamel.yaml tqdm
-# clone + %cd into repo ...
+%cd /content/11685-Diffusion-Project   # adjust path if needed
+import os
+os.environ["DDPM_RUNTIME"] = "colab"
 !python train.py --config configs/ddpm_colab.yaml --runtime colab
 ```
 
-With **`--runtime auto`**, Colab is detected automatically and **`num_workers`** is set to **0** even if the YAML says otherwise.
+With **`--runtime auto`**, Colab is detected and **`num_workers`** is forced to **0** for stable DataLoader behavior.
 
-**Persistence and limits**
+### Saving checkpoints after training
 
-- The FAQ notes that **free-tier** access to expensive resources like GPUs is **heavily restricted**, and that **runtimes can terminate** (idle timeouts, usage limits). Save checkpoints to **Google Drive** (`google.colab.drive.mount`) or download them before the session ends if you need them later.
-- The FAQ also warns that **Drive-mounted I/O can be slow**; prefer keeping active training data on the VM’s local disk when possible.
+- Use the **Files** sidebar to **download** `experiments/`, or  
+- **Copy to Drive** (better for a few large files than training directly off Drive):
 
-**Examples from Google**
+```python
+from google.colab import drive
+drive.mount("/content/drive")
+!mkdir -p "/content/drive/MyDrive/ddpm_backup"
+!cp -r experiments "/content/drive/MyDrive/ddpm_backup/"
+```
 
-Colab links to example notebooks such as [TensorFlow With GPU](https://colab.research.google.com/notebooks/gpu.ipynb) for accelerator usage patterns; PyTorch users typically check `torch.cuda.is_available()` after selecting a GPU runtime.
+### References
+
+- [Colab FAQ](https://research.google.com/colaboratory/faq.html) — GPUs, limits, Drive, disconnects  
+- FAQ-linked example: [TensorFlow with GPU](https://colab.research.google.com/notebooks/gpu.ipynb); for PyTorch use `torch.cuda.is_available()` after selecting a GPU runtime.
 
 ---
 
