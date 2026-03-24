@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
+"""
+Single-GPU:  python train.py [args]
+Multi-GPU:   python train.py --ddp [args]
+             (auto re-launches with torch.distributed.run on all visible CUDA devices)
+Or:          torchrun --nproc_per_node=N train.py [args]
+"""
 import os
+import sys
 import argparse
 import logging
 from logging import getLogger as get_logger
@@ -15,7 +22,16 @@ from torchvision import datasets, transforms
 from models import UNet, VAE, ClassEmbedder
 from schedulers import DDPMScheduler, DDIMScheduler
 from pipelines import DDPMPipeline
-from utils import seed_everything, init_distributed_device, is_primary, AverageMeter, str2bool, save_checkpoint
+from utils import (
+    seed_everything,
+    init_distributed_device,
+    is_primary,
+    distributed_barrier,
+    destroy_distributed,
+    AverageMeter,
+    str2bool,
+    save_checkpoint,
+)
 from ddpm_runtime import apply_runtime_to_args
 
 logger = get_logger(__name__)
@@ -79,6 +95,11 @@ def parse_args():
     parser.add_argument("--use_wandb", type=str2bool, default=False)
     parser.add_argument("--local_rank", type=int, default=-1, help="Set automatically for distributed")
     parser.add_argument(
+        "--ddp",
+        action="store_true",
+        help="Multi-GPU on one machine: relaunch via torch.distributed.run (omit when already using torchrun).",
+    )
+    parser.add_argument(
         "--cifar_download",
         type=str2bool,
         default=True,
@@ -132,6 +153,13 @@ def main():
     args = parse_args()
     apply_runtime_to_args(args)
 
+    try:
+        _train_main(args)
+    finally:
+        destroy_distributed(args)
+
+
+def _train_main(args):
     seed_everything(args.seed)
 
     logging.basicConfig(
@@ -161,8 +189,7 @@ def main():
     if args.distributed:
         sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, shuffle=True)
     shuffle = sampler is None
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
+    loader_kw = dict(
         batch_size=args.batch_size,
         shuffle=shuffle,
         sampler=sampler,
@@ -170,6 +197,10 @@ def main():
         pin_memory=torch.cuda.is_available(),
         drop_last=True,
     )
+    if args.num_workers > 0:
+        loader_kw["persistent_workers"] = True
+        loader_kw["prefetch_factor"] = 2
+    train_loader = torch.utils.data.DataLoader(train_dataset, **loader_kw)
 
     total_batch_size = args.batch_size * args.world_size
     args.total_batch_size = total_batch_size
@@ -184,6 +215,7 @@ def main():
     if is_primary(args):
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(save_dir, exist_ok=True)
+    distributed_barrier(args)
 
     num_update_steps_per_epoch = len(train_loader)
     args.max_train_steps = args.num_epochs * num_update_steps_per_epoch
@@ -291,6 +323,7 @@ def main():
         file_yaml = yaml.YAML()
         with open(os.path.join(output_dir, "config.yaml"), "w", encoding="utf-8") as f:
             file_yaml.dump(vars(args), f)
+    distributed_barrier(args)
 
     wandb_logger = None
     if is_primary(args) and args.use_wandb:
@@ -373,33 +406,33 @@ def main():
                 wb_log({"loss": loss_m.avg})
 
         unet.eval()
-        generator = torch.Generator(device=device)
-        generator.manual_seed(epoch + args.seed)
-
-        with torch.no_grad():
-            if args.use_cfg:
-                classes = torch.randint(0, args.num_classes, (4,), device=device)
-                gen_images = pipeline(
-                    batch_size=4,
-                    num_inference_steps=args.num_inference_steps,
-                    classes=classes,
-                    guidance_scale=args.cfg_guidance_scale,
-                    generator=generator,
-                    device=device,
-                )
-            else:
-                gen_images = pipeline(
-                    batch_size=4,
-                    num_inference_steps=args.num_inference_steps,
-                    generator=generator,
-                    device=device,
-                )
-
-        grid_image = Image.new("RGB", (4 * args.image_size, args.image_size))
-        for i, image in enumerate(gen_images):
-            x = (i % 4) * args.image_size
-            grid_image.paste(image, (x, 0))
         if is_primary(args):
+            generator = torch.Generator(device=device)
+            generator.manual_seed(epoch + args.seed)
+
+            with torch.no_grad():
+                if args.use_cfg:
+                    classes = torch.randint(0, args.num_classes, (4,), device=device)
+                    gen_images = pipeline(
+                        batch_size=4,
+                        num_inference_steps=args.num_inference_steps,
+                        classes=classes,
+                        guidance_scale=args.cfg_guidance_scale,
+                        generator=generator,
+                        device=device,
+                    )
+                else:
+                    gen_images = pipeline(
+                        batch_size=4,
+                        num_inference_steps=args.num_inference_steps,
+                        generator=generator,
+                        device=device,
+                    )
+
+            grid_image = Image.new("RGB", (4 * args.image_size, args.image_size))
+            for i, image in enumerate(gen_images):
+                x = (i % 4) * args.image_size
+                grid_image.paste(image, (x, 0))
             if wandb_logger is not None:
                 import wandb
 
@@ -407,6 +440,8 @@ def main():
             else:
                 grid_path = os.path.join(output_dir, "sample_epoch_{:04d}.png".format(epoch))
                 grid_image.save(grid_path)
+
+        distributed_barrier(args)
 
         if is_primary(args):
             save_checkpoint(
@@ -418,7 +453,30 @@ def main():
                 epoch,
                 save_dir=save_dir,
             )
+        distributed_barrier(args)
+
+
+def _maybe_launch_ddp():
+    """Re-exec under torch.distributed.run when --ddp and not already in a launched group."""
+    if "--ddp" not in sys.argv:
+        return False
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        return False
+    if not torch.cuda.is_available():
+        print("train.py: --ddp ignored (no CUDA). Running single process on CPU.", file=sys.stderr)
+        sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if a != "--ddp"]
+        return False
+    n = torch.cuda.device_count()
+    if n < 1:
+        return False
+    script = os.path.abspath(__file__)
+    child_argv = [a for a in sys.argv[1:] if a != "--ddp"]
+    os.execv(
+        sys.executable,
+        [sys.executable, "-m", "torch.distributed.run", "--nproc_per_node", str(n), script] + child_argv,
+    )
 
 
 if __name__ == "__main__":
+    _maybe_launch_ddp()
     main()

@@ -53,7 +53,7 @@ class DDPMPipeline:
         self,
         batch_size: int = 1,
         num_inference_steps: int = 1000,
-        classes: Optional[Union[int, List[int]]] = None,
+        classes: Optional[Union[int, List[int], torch.Tensor]] = None,
         guidance_scale: Optional[float] = None,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         device=None,
@@ -70,10 +70,20 @@ class DDPMPipeline:
 
         if classes is not None:
             if isinstance(classes, int):
-                classes = [classes] * batch_size
+                classes_t = torch.full((batch_size,), int(classes), device=device, dtype=torch.long)
             elif isinstance(classes, list):
                 assert len(classes) == batch_size, "Length of classes must be equal to batch_size"
-            classes = torch.tensor(classes, device=device, dtype=torch.long)
+                classes_t = torch.tensor(classes, device=device, dtype=torch.long)
+            elif isinstance(classes, torch.Tensor):
+                classes_t = classes.to(device=device, dtype=torch.long).reshape(-1)
+                assert classes_t.shape[0] == batch_size, (
+                    "classes tensor length {} must equal batch_size {}".format(classes_t.shape[0], batch_size)
+                )
+            else:
+                raise TypeError(
+                    "classes must be int, list of int, or LongTensor, got {}".format(type(classes))
+                )
+            classes = classes_t
             uncond_classes = torch.full_like(classes, self.class_embedder.num_classes)
             class_embeds = self.class_embedder(classes)
             uncond_embeds = self.class_embedder(uncond_classes)

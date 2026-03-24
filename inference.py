@@ -140,16 +140,16 @@ def main():
     ref_images = (ref_images + 1) / 2
 
     try:
-        import torchmetrics
         from torchmetrics.image.fid import FrechetInceptionDistance
-
-        try:
-            from torchmetrics.image.inception import InceptionScore
-        except ImportError:
-            from torchmetrics.image.fid import InceptionScore
     except ImportError:
         logger.warning("torchmetrics not installed; skip FID/IS. pip install torchmetrics")
         return
+
+    try:
+        from torchmetrics.image.inception import InceptionScore
+    except ImportError:
+        logger.warning("torchmetrics.image.inception.InceptionScore not available; skip IS, FID only")
+        InceptionScore = None
 
     gen_tensors = []
     for img in all_images:
@@ -157,17 +157,18 @@ def main():
     gen_tensors = torch.stack(gen_tensors)
 
     fid = FrechetInceptionDistance(feature=64, normalize=False).to(device)
-    inception = InceptionScore(normalize=False).to(device)
 
     fid.update(ref_images, real=True)
     fid.update(gen_tensors, real=False)
-    inception.update(gen_tensors)
 
     fid_score = fid.compute()
-    is_mean, is_std = inception.compute()
-
     logger.info("FID Score: %s", fid_score)
-    logger.info("Inception Score: %s +/- %s", is_mean, is_std)
+
+    if InceptionScore is not None:
+        inception = InceptionScore(normalize=False).to(device)
+        inception.update(gen_tensors)
+        is_mean, is_std = inception.compute()
+        logger.info("Inception Score: %s +/- %s", is_mean, is_std)
 
 
 if __name__ == "__main__":

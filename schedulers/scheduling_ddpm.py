@@ -58,9 +58,10 @@ class DDPMScheduler(nn.Module):
         ts = np.arange(self.num_train_timesteps - 1, -1, -stride, dtype=np.int64)
         if ts[-1] != 0:
             ts = np.append(ts, 0)
-        self.timesteps = torch.from_numpy(ts).long()
+        new_ts = torch.from_numpy(ts).long()
         if device is not None:
-            self.timesteps = self.timesteps.to(device)
+            new_ts = new_ts.to(device)
+        self.register_buffer("timesteps", new_ts)
         self.num_inference_steps = num_inference_steps
 
     def __len__(self):

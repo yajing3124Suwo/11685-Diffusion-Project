@@ -58,6 +58,8 @@ def init_distributed_device(args):
         else:
             device = torch.device("cuda", 0)
     else:
+        if args.distributed:
+            dist.init_process_group(backend="gloo")
         device = torch.device("cpu")
     args.device = device
     return device
@@ -65,6 +67,21 @@ def init_distributed_device(args):
 
 def is_primary(args):
     return not args.distributed or args.rank == 0
+
+
+def distributed_barrier(args):
+    """All-reduce style sync; no-op when not using DDP."""
+    if getattr(args, "distributed", False):
+        dist.barrier()
+
+
+def destroy_distributed(args):
+    if not getattr(args, "distributed", False):
+        return
+    if not dist.is_initialized():
+        return
+    dist.barrier()
+    dist.destroy_process_group()
 
 
 class AverageMeter(object):

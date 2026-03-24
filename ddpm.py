@@ -19,6 +19,7 @@ class DDPMPipeline:
             self.vae = vae
             
         # NOTE: this is for CFG
+        self.class_embedder = None
         if class_embedder is not None:
             self.class_embedder = class_embedder
 
@@ -58,7 +59,7 @@ class DDPMPipeline:
         self, 
         batch_size: int = 1,
         num_inference_steps: int = 1000,
-        classes: Optional[Union[int, List[int]]] = None,
+        classes: Optional[Union[int, List[int], torch.Tensor]] = None,
         guidance_scale : Optional[float] = None,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         device = None,
@@ -67,17 +68,26 @@ class DDPMPipeline:
         if device is None:
             device = next(self.unet.parameters()).device
         
+        class_embeds = None
+        uncond_embeds = None
+
         # NOTE: this is for CFG
         if classes is not None or guidance_scale is not None:
-            assert hasattr(self, "class_embedder"), "class_embedder is not defined"
-        
+            assert self.class_embedder is not None, "class_embedder is not defined"
+
         if classes is not None:
-            # convert classes to tensor
             if isinstance(classes, int):
-                classes = [classes] * batch_size
+                classes = torch.full((batch_size,), int(classes), device=device, dtype=torch.long)
             elif isinstance(classes, list):
                 assert len(classes) == batch_size, "Length of classes must be equal to batch_size"
-                classes = torch.tensor(classes, device=device)
+                classes = torch.tensor(classes, device=device, dtype=torch.long)
+            elif isinstance(classes, torch.Tensor):
+                classes = classes.to(device=device, dtype=torch.long).reshape(-1)
+                assert classes.shape[0] == batch_size, (
+                    "classes tensor length {} must equal batch_size {}".format(classes.shape[0], batch_size)
+                )
+            else:
+                raise TypeError("classes must be int, list of int, or LongTensor, got {}".format(type(classes)))
             
             # TODO: get uncond classes
             uncond_classes = torch.full_like(classes, self.class_embedder.num_classes) # TODO
@@ -94,8 +104,13 @@ class DDPMPipeline:
         
         # TODO: inverse diffusion process with for loop
         for t in self.progress_bar(self.scheduler.timesteps):
+            t_i = int(t) if not isinstance(t, int) else t
 
-            use_cfg = (class_embeds is not None) and (guidance_scale is not None) and (guidance_scale != 1.0)
+            use_cfg = (
+                class_embeds is not None
+                and guidance_scale is not None
+                and abs(float(guidance_scale) - 1.0) > 1e-6
+            )
 
             if use_cfg:
                 # double batch: [uncond, cond]
@@ -104,27 +119,24 @@ class DDPMPipeline:
             else:
                 model_input = image
                 c = class_embeds  # None if no CFG
-            
-            # # NOTE: this is for CFG
-            # if guidance_scale is not None or guidance_scale != 1.0:
-            #     # TODO: implement cfg
-            #     model_input = None 
-            #     c = None 
-            # else:
-            #     model_input = None 
-            #     # NOTE: leave c as None if you are not using CFG
-            #     c = None
-            
+
             # TODO: 1. predict noise model_output
-            model_output = self.unet(model_input, t, c) # TODO 
-            
-            if guidance_scale is not None or guidance_scale != 1.0:
-                # TODO: implement cfg
-                uncond_model_output, cond_model_output = model_output.chunk(2)
-                model_output = uncond_out + guidance_scale * (cond_out - uncond_out) # TODO 
-            
+            b = model_input.shape[0]
+            ts = torch.full((b,), t_i, device=device, dtype=torch.long)
+            model_output = self.unet(model_input, ts, c)  # TODO
+
+            if (
+                guidance_scale is not None
+                and abs(float(guidance_scale) - 1.0) > 1e-6
+                and class_embeds is not None
+            ):
+                uncond_model_output, cond_model_output = model_output.chunk(2, dim=0)
+                model_output = uncond_model_output + guidance_scale * (
+                    cond_model_output - uncond_model_output
+                )  # TODO
+
             # TODO: 2. compute previous image: x_t -> x_t-1 using scheduler
-            image = self.scheduler.step(model_output, t, image, generator=generator) # TODO  
+            image = self.scheduler.step(model_output, t_i, image, generator=generator)  # TODO
             
         
         # NOTE: this is for latent DDPM
